@@ -8,6 +8,8 @@ from torchvision import transforms
 from torchvision.datasets import Cityscapes
 import sys
 from tqdm import tqdm
+from argparse import ArgumentParser
+
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -54,6 +56,12 @@ def replace_conv_out(layer):
 
 def train() :
 
+    parser = ArgumentParser()
+
+    parser.add_argument('--epochnum',default= 1 , help = "Enter the number of epoch model is starting from")
+    args = parser.parse_args()
+    epochnum = args.epochnum
+
   # Load Cityscapes training dataset
     train_dataset = Cityscapes(
         root=cityscapes_root,
@@ -63,17 +71,18 @@ def train() :
         transform=transform,
         target_transform=target_transform
     )
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=1, pin_memory=True, drop_last=True)
 
   # Initialize BiSeNetV2 model with 20 output classes (19 + background)
     model = BiSeNetV2(n_classes=20, aux_mode='train')
     
 
-    replace_conv_out(model.head.conv_out)
-    replace_conv_out(model.aux2.conv_out)
-    replace_conv_out(model.aux3.conv_out)
-    replace_conv_out(model.aux4.conv_out)
-    replace_conv_out(model.aux5_4.conv_out)
+    #place this onlt if this is the first time running this file
+    # replace_conv_out(model.head.conv_out)
+    # replace_conv_out(model.aux2.conv_out)
+    # replace_conv_out(model.aux3.conv_out)
+    # replace_conv_out(model.aux4.conv_out)
+    # replace_conv_out(model.aux5_4.conv_out)
 
 
     
@@ -137,7 +146,8 @@ def train() :
 
             loop.set_postfix(loss=loss.item())
             epoch_loss += loss.item()
-        print(f"Epoch {epoch+1}/5, Loss: {epoch_loss/len(train_loader):.4f}")
+        print(f"Epoch {epoch+epochnum}/{epochnum+5}, Loss: {epoch_loss/len(train_loader):.4f}")
+        torch.save(model.state_dict(), f"./checkpoints/bisenetv2_finetuned_epoch{epoch + epochnum}.pth")
 
     # Save checkpoint
     torch.save(model.state_dict(), "./checkpoints/bisenetv2_finetuned.pth")

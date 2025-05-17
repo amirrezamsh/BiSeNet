@@ -274,9 +274,23 @@ class BGALayer(nn.Module):
         right1 = self.right1(x_s)
         right2 = self.right2(x_s)
         right1 = self.up1(right1)
+
+        # Ensure right1 has same spatial size as left1
+        if right1.size()[2:] != left1.size()[2:]:
+            right1 = F.interpolate(right1, size=left1.shape[2:], mode='bilinear', align_corners=False)
+
         left = left1 * torch.sigmoid(right1)
+       
+
         right = left2 * torch.sigmoid(right2)
         right = self.up2(right)
+
+        
+        # Ensure right has same spatial size as left
+        if right.size()[2:] != left.size()[2:]:
+            right = F.interpolate(right, size=left.shape[2:], mode='bilinear', align_corners=False)
+
+
         out = self.conv(left + right)
         return out
 
