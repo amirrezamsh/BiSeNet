@@ -60,7 +60,11 @@ def train() :
 
     parser.add_argument('--epochnum',default= 1 , help = "Enter the number of epoch model is starting from")
     args = parser.parse_args()
-    epochnum = args.epochnum
+    try:
+        epochnum = int(args.epochnum)
+    except ValueError:
+        print("Error: Invalid epochnum argument")
+        exit(1)
 
   # Load Cityscapes training dataset
     train_dataset = Cityscapes(
