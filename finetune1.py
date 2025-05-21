@@ -43,9 +43,11 @@ transform = Compose([
 ])
 
 def pil_to_long_tensor(pic):
-    label =  torch.from_numpy(np.array(pic)).long()
-    label[label == 255] = 19
+    label = torch.from_numpy(np.array(pic)).long()
+    label[label == 255] = 19  # void in Cityscapes fine annotations
+    label[label >= 20] = 19   # remap all invalid classes to void
     return label
+
 
 target_transform = Compose([
     Resize((512, 1024), Image.NEAREST),
@@ -134,7 +136,10 @@ def train() :
                 elif name not in own_state and f"module.{name}" not in own_state and name.split("module.")[-1] not in own_state:
                     missing.append(name)
             else:
-                own_state[name].copy_(param)
+                if own_state[name].shape == param.shape :
+                    own_state[name].copy_(param)
+                else :
+                    missing.append(name)
         print(f"missing keys : {missing}")
         return model
     
@@ -159,7 +164,7 @@ def train() :
 
   # Define loss and optimizer (only params with requires_grad=True will be updated)
   
-    criterion = nn.CrossEntropyLoss(ignore_index=None)
+    criterion = nn.CrossEntropyLoss()
 
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4)
 
@@ -171,6 +176,7 @@ def train() :
         for images, targets in loop:
             images = images.to(device)            # shape: (B, 3, H, W)
             targets = targets.to(device)          # shape: (B, H, W), values in [0..19]
+
 
             targets = targets.squeeze(1)
 
@@ -184,6 +190,10 @@ def train() :
             # If model returns auxiliary outputs as a tuple/list, take the first (main) output
             if isinstance(outputs, (tuple, list)):
                 outputs = outputs[0]
+
+            # unique_values = torch.unique(targets)
+            # print("Unique target values:", unique_values)
+
             # outputs: (B, 20, H, W)
             # targets[targets >= 20] = 255
 
