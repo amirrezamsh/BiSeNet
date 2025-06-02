@@ -24,8 +24,9 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Paths (update if needed)
-weights_path = './checkpoints/bisenetv2_finetuned_epoch10.pth'
-cityscapes_root = r"D:\semester_3\AML\project\datasets\cityscapes"
+weights_path = './checkpoints/Checkpoint10.pth'
+# cityscapes_root = r"D:\semester_3\AML\project\datasets\cityscapes"
+cityscapes_root = '../cityscapes'
 
 # Ensure output directory exists
 os.makedirs("./checkpoints", exist_ok=True)
@@ -36,6 +37,33 @@ sys.path.append('BiSeNet/lib')
 from lib.models.bisenetv2 import BiSeNetV2
 
 # Define image transformations: resize, to-tensor, normalize
+mapping_20 = { 
+    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0,
+    7: 1, 8: 2,
+    9: 0, 10: 0,
+    11: 3, 12: 4, 13: 5,
+    14: 0, 15: 0, 16: 0,
+    17: 6, 18: 0, 19: 7, 20: 8, 21: 9,
+    22: 10, 23: 11, 24: 12, 25: 13, 26: 14,
+    27: 15, 28: 16,
+    29: 0, 30: 0,
+    31: 17, 32: 18, 33: 19,
+    # -1: 0
+    255:0
+}
+
+# Create fast lookup table (for performance)
+mapping_array = np.zeros(256, dtype=np.uint8)
+for k, v in mapping_20.items():
+    mapping_array[k] = v
+
+# Transformation function for the label
+def pil_to_mapped_tensor(pic):
+    label = np.array(pic)  # Convert PIL to numpy
+    # label[label == -1] = 255
+    label = mapping_array[label]  # Apply mapping
+    return torch.from_numpy(label).long()
+
 
 transform = Compose([
     Resize((512, 1024), Image.BILINEAR),
@@ -44,31 +72,17 @@ transform = Compose([
                 std=[0.229, 0.224, 0.225]),
 ])
 
-def pil_to_long_tensor(pic):
-    label = torch.from_numpy(np.array(pic)).long()
-    label[label == 255] = 19  # void in Cityscapes fine annotations
-    label[label >= 20] = 19   # remap all invalid classes to void
-    return label
 
 
 target_transform = Compose([
     Resize((512, 1024), Image.NEAREST),
-    pil_to_long_tensor,
+    pil_to_mapped_tensor,
 ])
 
 
 
+
 def train() :
-
-    parser = ArgumentParser()
-
-    parser.add_argument('--epochnum',default= 1 , help = "Enter the number of epoch model is starting from")
-    args = parser.parse_args()
-    try:
-        epochnum = int(args.epochnum)
-    except ValueError:
-        print("Error: Invalid epochnum argument")
-        exit(1)
 
   # Load Cityscapes training dataset
     train_dataset = Cityscapes(
@@ -79,7 +93,7 @@ def train() :
         transform=transform,
         target_transform=target_transform
     )
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=1, pin_memory=True, drop_last=True)
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2, pin_memory=True, drop_last=True)
 
   # Initialize BiSeNetV2 model with 20 output classes (19 + background)
     model = BiSeNetV2(n_classes=20, aux_mode='train')
@@ -105,9 +119,11 @@ def train() :
         return model
     
     
-    state_dict = torch.load(weights_path, map_location=lambda storage, loc: storage, weights_only=False)
+    checkpoint = torch.load(weights_path, map_location=lambda storage, loc: storage, weights_only=False)
 
-    model = load_my_state_dict(model, state_dict)
+    epochnum = checkpoint['epoch'] + 1
+
+    model = load_my_state_dict(model, checkpoint['model_state_dict'])
     
     model.to(device)
 
@@ -116,19 +132,41 @@ def train() :
 
     param_num = 0
     for name, param in model.named_parameters():
-      if (
-          'conv_out' in name               # all 1×1 classifier heads
-          or name.startswith('head.conv.') # the head fusion conv
-          or name.startswith('bga.')       # all of the BGA module
-      ):
-          param.requires_grad = True
-          param_num += 1
-      else:
-          param.requires_grad = False
+        if 'conv_out' in name \
+        or name.startswith('head.conv') and 'conv_out' not in name \
+        or name.startswith('segment.S5_4') \
+        or name.startswith('segment.S5_5') \
+        or name.startswith('bga'):
+            param.requires_grad = True
+            param_num+=1
+        else :
+            param.requires_grad = False
 
     print(f"✅Gradiation turned on for {param_num} parameters")
 
     criterion = nn.CrossEntropyLoss()
+
+    # 
+    head_params = []
+    backbone_params = []
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            if 'conv_out' in name or name.startswith('head.conv'):
+                head_params.append(p)
+            else:
+                backbone_params.append(p)
+
+    optimizer = optim.Adam([
+        {'params': head_params,     'lr': 1e-4},
+        {'params': backbone_params, 'lr': 1e-5},
+    ], weight_decay=1e-4)
+
+    start_epoch = checkpoint.get('epoch', 0) 
+
+    scheduler = StepLR(optimizer, step_size=5, gamma=0.1)
+    
+    scheduler.last_epoch = start_epoch
+    # 
 
     def compute_loss(outs, targets):
       main, a2, a3, a4, a5 = outs
@@ -140,34 +178,22 @@ def train() :
       return loss_main + loss_aux
     
     # 2) Optimizer
-    params = [
-      {'params': [p for n,p in model.named_parameters() if 'conv_out' in n], 'lr':1e-4},
-      {'params': [p for n,p in model.named_parameters() if 'head.conv.' in n or 'bga.' in n], 'lr':5e-5},
-    ]
-    optimizer = torch.optim.Adam(params, weight_decay=1e-4)
-    scheduler = StepLR(optimizer, step_size=5, gamma=0.1)
+
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
     model.train()
 
-    for epoch in range(20):
+    for epoch in range(10):
       epoch_loss = 0.0
-      loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/20")
+      loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/10")
       for images, targets in loop:
           images = images.to(device)            # shape: (B, 3, H, W)
           targets = targets.to(device)          # shape: (B, H, W), values in [0..19]
 
-
-          targets = targets.squeeze(1)
-
+          #targets = targets.squeeze(1)
 
           outputs = model(images)
-
-
-          # unique_values = torch.unique(targets)
-          # print("Unique target values:", unique_values)
-
-          # outputs: (B, 20, H, W)
-          # targets[targets >= 20] = 255
 
           optimizer.zero_grad()
 
@@ -177,14 +203,20 @@ def train() :
           loop.set_postfix(loss=loss.item())
           epoch_loss += loss.item()
       scheduler.step()
-      print(f"Epoch {epoch+epochnum}/{epochnum+19}, Loss: {epoch_loss/len(train_loader):.4f}")
-      torch.save(model.state_dict(), f"./checkpoints/bisenetv2_finetuned2_epoch{epoch + epochnum}.pth")
+      print(f"Epoch {epoch+epochnum}/{epochnum+9}, Loss: {epoch_loss/len(train_loader):.4f}")
+      # Save full training state
+      torch.save({
+          'epoch': epoch + epochnum,
+          'model_state_dict': model.state_dict(),
+          'optimizer_state_dict': optimizer.state_dict(),
+          'scheduler_state_dict': scheduler.state_dict()
+      }, f'./checkpoints/Checkpoint{epochnum + epoch}.pth')
 
-    torch.save(model.state_dict(), "./checkpoints/bisenetv2_finetuned2.pth")
+
+    #torch.save(model.state_dict(), "./checkpoints/bisenetv2_finetuned2.pth")
 
 if __name__ == '__main__':
     train()
-
 
 
 

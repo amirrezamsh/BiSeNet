@@ -12,6 +12,8 @@ from argparse import ArgumentParser
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 from PIL import Image
 import numpy as np
+from torch.optim.lr_scheduler import StepLR
+
 
 
 
@@ -23,17 +25,44 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Paths (update if needed)
 weights_path = './checkpoints/model_final_v2_city.pth'
-cityscapes_root = r"D:\semester_3\AML\project\datasets\cityscapes"
+cityscapes_root = '../cityscapes'
+# cityscapes_root = r"D:\semester_3\AML\project\datasets\cityscapes"
 
 # Ensure output directory exists
 os.makedirs("./checkpoints", exist_ok=True)
-
 
 
 sys.path.append('BiSeNet/lib')
 from lib.models.bisenetv2 import BiSeNetV2
 
 # Define image transformations: resize, to-tensor, normalize
+
+mapping_20 = { 
+    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0,
+    7: 1, 8: 2,
+    9: 0, 10: 0,
+    11: 3, 12: 4, 13: 5,
+    14: 0, 15: 0, 16: 0,
+    17: 6, 18: 0, 19: 7, 20: 8, 21: 9,
+    22: 10, 23: 11, 24: 12, 25: 13, 26: 14,
+    27: 15, 28: 16,
+    29: 0, 30: 0,
+    31: 17, 32: 18, 33: 19,
+    255:0
+}
+
+# Create fast lookup table (for performance)
+mapping_array = np.zeros(256, dtype=np.uint8)
+for k, v in mapping_20.items():
+    mapping_array[k] = v
+
+# Transformation function for the label
+def pil_to_mapped_tensor(pic):
+    label = np.array(pic)  # Convert PIL to numpy
+    # label[label == -1] = 255
+    label = mapping_array[label]  # Apply mapping
+    return torch.from_numpy(label).long()
+
 
 transform = Compose([
     Resize((512, 1024), Image.BILINEAR),
@@ -42,16 +71,11 @@ transform = Compose([
                 std=[0.229, 0.224, 0.225]),
 ])
 
-def pil_to_long_tensor(pic):
-    label = torch.from_numpy(np.array(pic)).long()
-    label[label == 255] = 19  # void in Cityscapes fine annotations
-    label[label >= 20] = 19   # remap all invalid classes to void
-    return label
 
 
 target_transform = Compose([
     Resize((512, 1024), Image.NEAREST),
-    pil_to_long_tensor,
+    pil_to_mapped_tensor,
 ])
 
 
@@ -103,14 +127,14 @@ def train() :
         transform=transform,
         target_transform=target_transform
     )
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=1, pin_memory=True, drop_last=True)
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2, pin_memory=True, drop_last=True)
 
   # Initialize BiSeNetV2 model with 20 output classes (19 + background)
     model = BiSeNetV2(n_classes=20, aux_mode='train')
 
 
     #print statements to check
-    print(model.head.conv_out)
+    #print(model.head.conv_out)
 
     
 
@@ -152,21 +176,28 @@ def train() :
 
     print("✅Model weights updated sucssessfully")
 
-
+    num_grad_true = 0
     for name, param in model.named_parameters():
         if 'conv_out' in name:
             param.requires_grad = True
+            num_grad_true+=1
         else:
             param.requires_grad = False
 
 
-    print("✅Gradiation turned on only on interested layers")
+    print(f"✅Gradiation turned on only on {num_grad_true} parameters")
 
   # Define loss and optimizer (only params with requires_grad=True will be updated)
   
     criterion = nn.CrossEntropyLoss()
 
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4)
+    optimizer = optim.Adam(
+    filter(lambda p: p.requires_grad, model.parameters()), 
+    lr=1e-4, 
+    weight_decay=1e-4  # small weight decay for regularization
+)
+    
+    scheduler = StepLR(optimizer, step_size=5, gamma=0.1)
 
   # Training loop (5 epochs)
     model.train()
@@ -180,12 +211,7 @@ def train() :
 
             targets = targets.squeeze(1)
 
-            optimizer.zero_grad()
-
             outputs = model(images)
-
-            if isinstance(outputs, tuple):
-                outputs = outputs[0]
 
             # If model returns auxiliary outputs as a tuple/list, take the first (main) output
             if isinstance(outputs, (tuple, list)):
@@ -197,19 +223,23 @@ def train() :
             # outputs: (B, 20, H, W)
             # targets[targets >= 20] = 255
 
+            optimizer.zero_grad() 
 
             loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
+            loss.backward(); optimizer.step()
 
             loop.set_postfix(loss=loss.item())
             epoch_loss += loss.item()
-        print(f"Epoch {epoch+epochnum}/{epochnum+5}, Loss: {epoch_loss/len(train_loader):.4f}")
-        torch.save(model.state_dict(), f"./checkpoints/bisenetv2_finetuned_epoch{epoch + epochnum}.pth")
+        print(f"Epoch {epoch+epochnum}/{epochnum+9}, Loss: {epoch_loss/len(train_loader):.4f}")
+        torch.save({
+          'epoch': epoch + epochnum,
+          'model_state_dict': model.state_dict(),
+          'optimizer_state_dict': optimizer.state_dict(),
+          'scheduler_state_dict': scheduler.state_dict()
+      }, f'./checkpoints/Checkpoint{epochnum + epoch}.pth')
+        scheduler.step()
 
     # Save checkpoint
-    torch.save(model.state_dict(), "./checkpoints/bisenetv2_finetuned.pth")
 
 if __name__ == '__main__':
     train()
-

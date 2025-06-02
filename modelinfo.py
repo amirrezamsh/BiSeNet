@@ -4,7 +4,7 @@ import torch
 sys.path.append('BiSeNet/lib')
 from lib.models.bisenetv2 import BiSeNetV2
 
-weights_path = './checkpoints/bisenetv2_finetuned_epoch10.pth'
+weights_path = './checkpoints/checkpoint20.pth'
 
 model = BiSeNetV2(n_classes=20, aux_mode='train')
 
@@ -29,7 +29,12 @@ def load_my_state_dict(model, state_dict):
         return model
 
 
-state_dict = torch.load(weights_path, map_location=lambda storage, loc: storage, weights_only=False)
+checkpoint = torch.load(weights_path, map_location=lambda storage, loc: storage, weights_only=False)
+
+if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+    state_dict = checkpoint['model_state_dict']
+else:
+    state_dict = checkpoint  # raw state_dict
 
 model = load_my_state_dict(model, state_dict)
 
